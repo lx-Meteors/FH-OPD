@@ -73,6 +73,10 @@ policy_loss:
   # lambda_vals!=1.0: G-OPD 
   lambda_vals: 1.0
 
+  # Leading response tokens that use reward extrapolation
+  # 0: standard OPD; positive integer: prefix-only extrapolation; -1: full G-OPD
+  extrapolation_max_tokens: -1
+
   # Whether to use multi-teacher distillation
   # If false, uses single-teacher distillation path
   # If true, uses multi-teacher distillation path (requires opd_teacher field in data)

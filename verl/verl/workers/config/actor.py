@@ -43,7 +43,9 @@ class PolicyLossConfig(BaseConfig):
         ppo_kl_coef (float): KL divergence penalty coefficient.
         lambda_vals (float): Lambda coefficient for on-policy distillation (OPD/G-OPD/ExOPD).
             When lambda_vals=1.0, uses standard OPD.
-            When lambda_vals<1.0, uses G-OPD.
+            When lambda_vals!=1.0, uses reward extrapolation.
+        extrapolation_max_tokens (int): Number of leading response tokens that use
+            reward extrapolation. Use 0 for standard OPD and -1 for the full response.
     """
 
     loss_mode: str = "vanilla"
@@ -54,6 +56,7 @@ class PolicyLossConfig(BaseConfig):
     ppo_kl_coef: float = 0.1
     only_reverse_kl_advantages: bool = False
     lambda_vals: float = 1.0
+    extrapolation_max_tokens: int = -1
     multi_teacher_distill: bool = False
 
 

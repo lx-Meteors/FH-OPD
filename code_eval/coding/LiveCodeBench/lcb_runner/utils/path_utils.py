@@ -1,3 +1,4 @@
+import os
 import pathlib
 
 from lcb_runner.lm_styles import LanguageModel, LMStyle
@@ -17,7 +18,8 @@ def get_cache_path(model_repr:str, args) -> str:
     n = args.n
     temperature = args.temperature
     model_name = args.local_model_path.split("/")[-1]
-    path = f"./lcb_outputs/{model_name}/cache/{scenario}_{n}_{temperature}.json"
+    output_root = os.environ.get("LCB_OUTPUT_ROOT", "./lcb_outputs")
+    path = f"{output_root}/{model_name}/cache/{scenario}_{n}_{temperature}.json"
     ensure_dir(path)
     return path
 
@@ -28,7 +30,8 @@ def get_output_path(model_repr:str, args) -> str:
     temperature = args.temperature
     cot_suffix = "_cot" if args.cot_code_execution else ""
     model_name = args.local_model_path.split("/")[-1]
-    path = f"./lcb_outputs/{model_name}/{scenario}_{n}_{temperature}{cot_suffix}.json"
+    output_root = os.environ.get("LCB_OUTPUT_ROOT", "./lcb_outputs")
+    path = f"{output_root}/{model_name}/{scenario}_{n}_{temperature}{cot_suffix}.json"
     ensure_dir(path)
     return path
 
@@ -39,5 +42,6 @@ def get_eval_all_output_path(model_repr:str, args) -> str:
     temperature = args.temperature
     cot_suffix = "_cot" if args.cot_code_execution else ""
     model_name = args.local_model_path.split("/")[-1]
-    path = f"./lcb_outputs/{model_name}/{scenario}_{n}_{temperature}{cot_suffix}_eval_all.json"
+    output_root = os.environ.get("LCB_OUTPUT_ROOT", "./lcb_outputs")
+    path = f"{output_root}/{model_name}/{scenario}_{n}_{temperature}{cot_suffix}_eval_all.json"
     return path

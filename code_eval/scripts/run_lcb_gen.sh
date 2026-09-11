@@ -1,4 +1,9 @@
-#!/bin/bash
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+LCB_ROOT="$(cd -- "${SCRIPT_DIR}/../coding/LiveCodeBench" && pwd)"
 
 # Default values
 MODEL_PATH="Qwen/Qwen3-4"
@@ -53,21 +58,21 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-cd code_eval/coding/LiveCodeBench
+cd "${LCB_ROOT}"
 
 # Run LiveCodeBench with the AZR template and a local model
-CUDA_VISIBLE_DEVICES=$CUDA_GPU_ID python -m lcb_runner.runner.main \
-  --model $MODEL_PATH \
-  --local_model_path $LOCAL_MODEL_PATH \
+CUDA_VISIBLE_DEVICES="$CUDA_GPU_ID" python3 -m lcb_runner.runner.main \
+  --model "$MODEL_PATH" \
+  --local_model_path "$LOCAL_MODEL_PATH" \
   --trust_remote_code \
   --scenario codegeneration \
   --release_version v6 \
-  --tensor_parallel_size $NUM_GPUS \
+  --tensor_parallel_size "$NUM_GPUS" \
   --use_cache \
-  --n $N \
-  --temperature $TEMPERATURE \
-  --max_tokens $MAX_TOKENS \
-  --custom_output_save_name $MODEL_PATH \
-  --top_p $TOP_P \
+  --n "$N" \
+  --temperature "$TEMPERATURE" \
+  --max_tokens "$MAX_TOKENS" \
+  --custom_output_save_name "$MODEL_PATH" \
+  --top_p "$TOP_P" \
   --timeout 60 \
   --evaluate --continue_existing --continue_existing_with_eval

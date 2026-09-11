@@ -838,11 +838,22 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             self.ref_policy = DataParallelPPOActor(config=self.config.ref, actor_module=self.ref_module_fsdp)
 
         # Initialize base models for corrected reward computation
+        policy_loss_config = self.config.actor.get("policy_loss", {})
+        multi_teacher_distill = policy_loss_config.get("multi_teacher_distill", False)
+        extrapolation_max_tokens = int(policy_loss_config.get("extrapolation_max_tokens", -1))
+        single_teacher_extrapolation_enabled = (
+            policy_loss_config.get("only_reverse_kl_advantages", False)
+            and not multi_teacher_distill
+            and float(policy_loss_config.get("lambda_vals", 1.0)) != 1.0
+            and extrapolation_max_tokens != 0
+        )
+
         # Actor's base model (for computing base_log_prob)
         self.base_policy = None
         self._has_base_model = False
         base_model_path = self.config.model.get("base_model_path", None)
-        if base_model_path is not None and self._is_actor:
+        needs_actor_base_model = multi_teacher_distill or single_teacher_extrapolation_enabled
+        if base_model_path is not None and self._is_actor and needs_actor_base_model:
             if self.rank == 0:
                 print(f"Actor base model: {base_model_path}")
             local_base_path = copy_to_local(base_model_path, use_shm=use_shm)
@@ -873,7 +884,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         self._has_base_ref_model = False
         ref_model_config = self.config.ref.get("model", {})
         ref_base_model_path = ref_model_config.get("base_model_path", None) if ref_model_config else None
-        if ref_base_model_path is not None and self._is_ref:
+        if ref_base_model_path is not None and self._is_ref and multi_teacher_distill:
             if self.rank == 0:
                 print(f"Ref base model: {ref_base_model_path}")
             local_ref_base_path = copy_to_local(ref_base_model_path, use_shm=use_shm)

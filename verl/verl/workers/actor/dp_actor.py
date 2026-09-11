@@ -40,10 +40,52 @@ from verl.utils.ulysses import gather_outputs_and_unpad, ulysses_pad, ulysses_pa
 from verl.workers.actor import BasePPOActor
 from verl.workers.config import ActorConfig
 
-__all__ = ["DataParallelPPOActor"]
+__all__ = ["DataParallelPPOActor", "compute_single_teacher_reverse_kl"]
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
+
+
+def compute_single_teacher_reverse_kl(
+    old_log_prob: torch.Tensor,
+    ref_log_prob: torch.Tensor,
+    base_log_prob: torch.Tensor | None,
+    lambda_vals: float,
+    extrapolation_max_tokens: int,
+) -> torch.Tensor:
+    """Compute single-teacher OPD/G-OPD reverse-KL token rewards.
+
+    The full response always receives the standard OPD reward. Reward
+    extrapolation adds the ``lambda_vals - 1`` correction only to the leading
+    ``extrapolation_max_tokens`` response positions. A value of 0 therefore
+    exactly recovers standard OPD, while -1 applies the correction to the full
+    response.
+    """
+    if extrapolation_max_tokens < -1:
+        raise ValueError("extrapolation_max_tokens must be -1, 0, or a positive integer")
+
+    standard_opd = old_log_prob - ref_log_prob
+    if extrapolation_max_tokens == 0 or lambda_vals == 1.0:
+        return standard_opd
+    if base_log_prob is None:
+        raise ValueError("base_log_prob is required when reward extrapolation is enabled")
+    if base_log_prob.shape != old_log_prob.shape:
+        raise ValueError(
+            f"base_log_prob shape {base_log_prob.shape} does not match response log-prob shape {old_log_prob.shape}"
+        )
+
+    correction = (lambda_vals - 1.0) * (ref_log_prob - base_log_prob)
+    if extrapolation_max_tokens == -1 or extrapolation_max_tokens >= old_log_prob.size(-1):
+        return standard_opd - correction
+
+    prefix_length = extrapolation_max_tokens
+    return torch.cat(
+        (
+            standard_opd[..., :prefix_length] - correction[..., :prefix_length],
+            standard_opd[..., prefix_length:],
+        ),
+        dim=-1,
+    )
 
 
 class DataParallelPPOActor(BasePPOActor):
@@ -519,17 +561,26 @@ class DataParallelPPOActor(BasePPOActor):
                                 #### multi-teacher distillation ####
                             else:
                                 #### single-teacher distillation ####
-                                reverse_kl = old_log_prob - model_inputs["base_log_prob"]
-                                reward_correction = model_inputs["ref_log_prob"] - model_inputs["base_log_prob"]
-
-                                if lambda_vals == 1.0:
-                                    reverse_kl = old_log_prob - model_inputs["ref_log_prob"]
-                                else:
-                                    reverse_kl = reverse_kl - reward_correction * lambda_vals
+                                reverse_kl = compute_single_teacher_reverse_kl(
+                                    old_log_prob=old_log_prob,
+                                    ref_log_prob=model_inputs["ref_log_prob"],
+                                    base_log_prob=model_inputs["base_log_prob"],
+                                    lambda_vals=lambda_vals,
+                                    extrapolation_max_tokens=self.config.policy_loss.extrapolation_max_tokens,
+                                )
                                 #### single-teacher distillation ####
                         else:
-                            # Standard reverse KL: log(π_actor / π_ref) = log_prob_actor - log_prob_ref
-                            reverse_kl = old_log_prob - model_inputs["ref_log_prob"]
+                            if self.config.policy_loss.multi_teacher_distill:
+                                # Standard reverse KL fallback for legacy multi-teacher configurations.
+                                reverse_kl = old_log_prob - model_inputs["ref_log_prob"]
+                            else:
+                                reverse_kl = compute_single_teacher_reverse_kl(
+                                    old_log_prob=old_log_prob,
+                                    ref_log_prob=model_inputs["ref_log_prob"],
+                                    base_log_prob=model_inputs.get("base_log_prob"),
+                                    lambda_vals=self.config.policy_loss.lambda_vals,
+                                    extrapolation_max_tokens=self.config.policy_loss.extrapolation_max_tokens,
+                                )
                         advantages = (- (reverse_kl))
                    
                     # gpg -> verl.trainer.ppo.core_algos.compute_policy_loss_gpg

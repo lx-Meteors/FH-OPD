@@ -34,11 +34,12 @@ required_files=(
     "DeepMath-103K/train_filtered_level6.parquet"
     "AIME2024/test.parquet"
     "AIME2025/test.parquet"
+    "Eurus/code_train.parquet"
+    "Eurus/code_validation.parquet"
 )
 
 optional_files=(
     "DeepMath-103K/train_filtered_level6_with_one_correct_solution.parquet"
-    "Eurus/code_validation.parquet"
     "math_and_code/train.parquet"
 )
 
@@ -57,7 +58,7 @@ for relative_path in "${optional_files[@]}"; do
 done
 
 if [[ "${missing_required}" -ne 0 ]]; then
-    echo "Dataset download finished, but required single-teacher files are missing." >&2
+    echo "Dataset download finished, but required Math/Code single-teacher files are missing." >&2
     exit 1
 fi
 

@@ -120,6 +120,69 @@ python3 -m verl.trainer.main_ppo \
 
 We provide more examples in the script `verl/examples/g_opd/run_qwen3-4b-g-opd.sh`.
 
+#### Prefix-Limited Reward Extrapolation
+
+For Math single-teacher training, `verl/examples/g_opd/run_qwen3-math-single-teacher-prefix-extrapolation.sh`
+runs exactly one experiment and accepts the reward-extrapolation length as its first argument:
+
+```bash
+cd verl
+
+# Standard OPD; no actor base-model forward
+bash examples/g_opd/run_qwen3-math-single-teacher-prefix-extrapolation.sh 0
+
+# Reward extrapolation on the first 2048 response tokens
+bash examples/g_opd/run_qwen3-math-single-teacher-prefix-extrapolation.sh 2k
+
+# Full-response G-OPD/ExOPD
+bash examples/g_opd/run_qwen3-math-single-teacher-prefix-extrapolation.sh full
+```
+
+Positive integer token counts such as `4096` are also supported. Override model and data paths with
+`STUDENT_MODEL_PATH`, `BASE_MODEL_PATH`, `TEACHER_MODEL_PATH`, and `DATA_ROOT`. The teacher forward
+still covers the full response because tokens after the extrapolated prefix retain the standard OPD
+reward. The actor base/reference model, which is only needed for the extra extrapolation correction,
+is forwarded on the selected prefix only and is skipped completely for length `0`.
+
+The scripts are preconfigured for the local server layout: `/personal/models/Qwen3-4B` is both the
+student and actor base model, while the default Math teacher is
+`/personal/models/Qwen3-4B-Non-Thinking-RL-Math-Step500`. The default data directory is the
+`G-OPD-Training-Data` directory created next to this repository by `scripts/download_gopd_data.sh`.
+For the same-size 4B-to-4B setting, `trainer.total_training_steps` is explicitly fixed to the paper's
+50-step setting. Math uses a one-epoch upper bound because its 57K examples provide more than 50
+batches at batch size 1024. Code uses a three-epoch upper bound because its 25K examples require the
+dataloader to cycle, but the trainer still stops immediately at step 50. Override
+`TOTAL_TRAINING_STEPS` only for a deliberate non-paper experiment.
+
+The equivalent single-code-teacher entry point uses `Eurus/code_train.parquet` and
+`Eurus/code_validation.parquet`:
+
+```bash
+cd verl
+
+bash examples/g_opd/run_qwen3-code-single-teacher-prefix-extrapolation.sh 0
+bash examples/g_opd/run_qwen3-code-single-teacher-prefix-extrapolation.sh 2k
+bash examples/g_opd/run_qwen3-code-single-teacher-prefix-extrapolation.sh full
+```
+
+The default Code teacher is `/personal/models/Qwen3-4B-Non-Thinking-RL-Code-Step300`.
+Set `SANDBOX_FUSION_URL` to an isolated Sandbox Fusion endpoint for safe code verification.
+Without it, the fallback PRIME evaluator executes generated code locally and is not a security sandbox.
+
+Both single-teacher launchers automatically select the final `global_step_*` checkpoint after training,
+merge its FSDP actor shards into a Hugging Face model, and then run evaluation. Math runs AIME24,
+AIME25, HMMT25 February, and HMMT25 November. Code runs HumanEval+, MBPP+, and LiveCodeBench v6;
+missing LiveCodeBench data is downloaded automatically with the existing `hf` command. Results are
+saved under:
+
+```text
+verl/G-OPD-checkpoints/<experiment>/evaluation/<experiment>_step_<N>/
+```
+
+The merged model is saved next to it under `merged_hf/<experiment>_step_<N>/`. Math experiment,
+merged-model, and evaluation names contain `math`; the Code equivalents contain `code`. Set
+`RUN_POST_TRAIN_EVAL=0` only when the automatic merge and evaluation should be skipped.
+
 ### Multi-Teacher Distillation
 In multi-teacher distillation experiments, we currently only support the two-teacher setting. First, you need to write `math` or `code` into the `extra_info` field of each data sample to indicate which domain teacher should be used:
 ```python
@@ -237,10 +300,15 @@ sh scripts/run_eval_math.sh
 ### Code Generation Evaluation
 Our evaluation is mainly based on the code provided in [Absolute-Zero-Reasoner](https://github.com/LeapLabTHU/Absolute-Zero-Reasoner). 
 
+The `Eurus/code_validation.parquet` run during training is an online validation signal; it does not
+replace the final benchmark evaluation below. Point these commands at a merged Hugging Face model
+directory rather than an individual FSDP shard directory.
+
 #### EvalPlus
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 bash code_eval/scripts/run_evalplus.sh humaneval <MODEL_PATH>  0 1.0 1.0 4
+CUDA_VISIBLE_DEVICES=0 bash code_eval/scripts/run_evalplus.sh humaneval <MODEL_PATH> 0 1.0 1.0 4
+CUDA_VISIBLE_DEVICES=0 bash code_eval/scripts/run_evalplus.sh mbpp      <MODEL_PATH> 0 1.0 1.0 4
 ```
 
 #### LiveCodeBench

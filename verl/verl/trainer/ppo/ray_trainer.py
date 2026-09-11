@@ -346,15 +346,51 @@ class RayPPOTrainer:
         if self.use_ref_solution_distillation:
             print("Ref solution distillation enabled")
 
-        # Store base model paths for corrected reward computation
+        # Store base model paths for corrected reward computation.
         self.base_model_path = config.actor_rollout_ref.model.get("base_model_path", None)
         self.ref_base_model_path = config.actor_rollout_ref.ref.get("model", None)
         if self.ref_base_model_path is not None:
             self.ref_base_model_path = self.ref_base_model_path.get("base_model_path", None)
-        self.use_base_models = self.base_model_path is not None and self.ref_base_model_path is not None
-        
-        if self.use_base_models:
-            print(f"Corrected reward enabled with base models:")
+
+        policy_loss_config = config.actor_rollout_ref.actor.policy_loss
+        self.multi_teacher_distill = policy_loss_config.get("multi_teacher_distill", False)
+        self.extrapolation_max_tokens = int(policy_loss_config.get("extrapolation_max_tokens", -1))
+        if self.extrapolation_max_tokens < -1:
+            raise ValueError("extrapolation_max_tokens must be -1, 0, or a positive integer")
+
+        self.single_teacher_extrapolation_enabled = (
+            policy_loss_config.get("only_reverse_kl_advantages", False)
+            and not self.multi_teacher_distill
+            and float(policy_loss_config.get("lambda_vals", 1.0)) != 1.0
+            and self.extrapolation_max_tokens != 0
+        )
+        if self.single_teacher_extrapolation_enabled and self.base_model_path is None:
+            raise ValueError(
+                "actor_rollout_ref.model.base_model_path is required when single-teacher reward extrapolation is enabled"
+            )
+
+        # Multi-teacher mode retains its existing two-base-model path. Single-teacher
+        # mode only needs the actor base model for the extra extrapolation term.
+        self.use_multi_teacher_base_models = (
+            self.multi_teacher_distill
+            and self.base_model_path is not None
+            and self.ref_base_model_path is not None
+        )
+        self.use_actor_base_model = (
+            self.single_teacher_extrapolation_enabled or self.use_multi_teacher_base_models
+        )
+        self.use_ref_base_model = self.use_multi_teacher_base_models
+
+        if self.single_teacher_extrapolation_enabled:
+            length_label = "full" if self.extrapolation_max_tokens == -1 else self.extrapolation_max_tokens
+            print("Single-teacher reward extrapolation enabled:")
+            print(f"  Actor base model: {self.base_model_path}")
+            print(f"  Extrapolation tokens: {length_label}")
+        elif not self.multi_teacher_distill:
+            print("Single-teacher standard OPD enabled; actor base-model forward is skipped")
+
+        if self.use_multi_teacher_base_models:
+            print("Multi-teacher corrected reward enabled with base models:")
             print(f"  Actor base model: {self.base_model_path}")
             print(f"  Ref base model: {self.ref_base_model_path}")
 
@@ -1000,6 +1036,42 @@ class RayPPOTrainer:
         )
         metrics.update(global_balance_stats)
 
+    def _prepare_actor_base_log_prob_batch(self, batch: DataProto) -> tuple[DataProto, int]:
+        """Select actor inputs and truncate the response for prefix extrapolation."""
+        batch_keys = ["responses", "input_ids", "attention_mask", "position_ids"]
+        non_tensor_batch_keys = ["multi_modal_inputs"] if "multi_modal_inputs" in batch.non_tensor_batch else []
+        base_batch = batch.select(
+            batch_keys=batch_keys,
+            non_tensor_batch_keys=non_tensor_batch_keys,
+        )
+
+        response_length = batch.batch["responses"].size(-1)
+        if self.extrapolation_max_tokens == -1 or self.extrapolation_max_tokens >= response_length:
+            return base_batch, response_length
+        if self.extrapolation_max_tokens <= 0:
+            raise ValueError("Actor base-model forward must not run when extrapolation_max_tokens is 0")
+
+        prefix_length = self.extrapolation_max_tokens
+        prompt_length = batch.batch["input_ids"].size(-1) - response_length
+        input_length = prompt_length + prefix_length
+
+        base_batch.batch["responses"] = base_batch.batch["responses"][..., :prefix_length]
+        base_batch.batch["input_ids"] = base_batch.batch["input_ids"][..., :input_length]
+        base_batch.batch["attention_mask"] = base_batch.batch["attention_mask"][..., :input_length]
+        base_batch.batch["position_ids"] = base_batch.batch["position_ids"][..., :input_length]
+        return base_batch, prefix_length
+
+    @staticmethod
+    def _pad_base_log_prob(base_log_prob: DataProto, response_length: int) -> DataProto:
+        """Pad a prefix-only base log-prob tensor back to the actor response width."""
+        prefix_log_prob = base_log_prob.batch["base_log_prob"]
+        if prefix_log_prob.size(-1) == response_length:
+            return base_log_prob
+
+        padded_log_prob = prefix_log_prob.new_zeros((*prefix_log_prob.shape[:-1], response_length))
+        padded_log_prob[..., : prefix_log_prob.size(-1)] = prefix_log_prob
+        return DataProto.from_dict(tensors={"base_log_prob": padded_log_prob})
+
     def fit(self):
         """
         The training loop of PPO.
@@ -1253,40 +1325,29 @@ class RayPPOTrainer:
                                     ref_log_prob = self.actor_rollout_wg.compute_ref_log_prob(batch)
                                 batch = batch.union(ref_log_prob)
 
-                    # Compute base model log probs for corrected reward computation
-                    # This computes: base_log_prob from actor's base model (using input_ids)
-                    # and base_ref_log_prob from ref's base model (using ref_input_ids)
-                    if self.use_base_models:
+                    # Compute only the base-model log probs required by the selected
+                    # distillation mode. For single-teacher prefix extrapolation, the
+                    # actor base model sees prompt + extrapolated response prefix only.
+                    if self.use_actor_base_model:
                         with marked_timer("base_log_probs", timing_raw, color="green"):
-                            # First compute base_ref_log_prob using ref's base model
-                            # This uses ref_input_ids which may be present in batch
-                            if not self.ref_in_actor:
-                                base_ref_log_prob = self.ref_policy_wg.compute_base_ref_log_prob(batch)
-                            else:
-                                base_ref_log_prob = self.actor_rollout_wg.compute_base_ref_log_prob(batch)
-                            batch = batch.union(base_ref_log_prob)
-                            
-                            # Now compute base_log_prob using actor's base model with input_ids
-                            # We need to temporarily remove ref_input_ids to ensure compute_log_prob uses input_ids
-                            ref_input_tensors = {}
-                            if "ref_input_ids" in batch.batch:
-                                ref_input_tensors["ref_input_ids"] = batch.batch.pop("ref_input_ids")
-                            if "ref_attention_mask" in batch.batch:
-                                ref_input_tensors["ref_attention_mask"] = batch.batch.pop("ref_attention_mask")
-                            if "ref_position_ids" in batch.batch:
-                                ref_input_tensors["ref_position_ids"] = batch.batch.pop("ref_position_ids")
-                            
-                            # Compute base_log_prob using actor's base model with input_ids
-                            base_log_prob = self.actor_rollout_wg.compute_base_log_prob(batch)
+                            if self.use_ref_base_model:
+                                if not self.ref_in_actor:
+                                    base_ref_log_prob = self.ref_policy_wg.compute_base_ref_log_prob(batch)
+                                else:
+                                    base_ref_log_prob = self.actor_rollout_wg.compute_base_ref_log_prob(batch)
+                                batch = batch.union(base_ref_log_prob)
+
+                            response_length = batch.batch["responses"].size(-1)
+                            base_batch, computed_tokens = self._prepare_actor_base_log_prob_batch(batch)
+                            base_log_prob = self.actor_rollout_wg.compute_base_log_prob(base_batch)
+                            base_log_prob = self._pad_base_log_prob(base_log_prob, response_length)
                             batch = batch.union(base_log_prob)
-                            
-                            # Restore ref_input_ids tensors back to batch
-                            for key, tensor in ref_input_tensors.items():
-                                batch.batch[key] = tensor
-                            
-                            print(f"Computed base log probs for corrected reward: "
-                                  f"base_log_prob shape={batch.batch['base_log_prob'].shape}, "
-                                  f"base_ref_log_prob shape={batch.batch['base_ref_log_prob'].shape}") 
+
+                            print(
+                                "Computed actor base log probs for corrected reward: "
+                                f"forward_response_tokens={computed_tokens}, "
+                                f"output_shape={batch.batch['base_log_prob'].shape}"
+                            )
                     
                     # compute values
                     if self.use_critic:
