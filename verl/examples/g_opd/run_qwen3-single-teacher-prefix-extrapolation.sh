@@ -2,6 +2,9 @@
 
 set -euo pipefail
 
+# Shared implementation for the Math and Code entry scripts. Most experiment
+# settings should be edited in the domain-specific launcher instead of here.
+
 usage() {
     cat <<'EOF'
 Usage:

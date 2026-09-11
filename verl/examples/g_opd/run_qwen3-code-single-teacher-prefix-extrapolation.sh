@@ -33,15 +33,23 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 COMMON_SCRIPT="${SCRIPT_DIR}/run_qwen3-single-teacher-prefix-extrapolation.sh"
 VERL_ROOT="$(cd -- "${SCRIPT_DIR}/../.." && pwd)"
 
+# ==================== User-editable Code configuration ====================
 export DATA_ROOT="${DATA_ROOT:-${VERL_ROOT}/../../G-OPD-Training-Data}"
 export MODEL_ROOT="${MODEL_ROOT:-/personal/models}"
+export STUDENT_MODEL_PATH="${STUDENT_MODEL_PATH:-${MODEL_ROOT}/Qwen3-4B}"
+export BASE_MODEL_PATH="${BASE_MODEL_PATH:-${STUDENT_MODEL_PATH}}"
 export TEACHER_MODEL_PATH="${TEACHER_MODEL_PATH:-${MODEL_ROOT}/Qwen3-4B-Non-Thinking-RL-Code-Step300}"
 export TRAIN_PATH="${DATA_ROOT}/Eurus/code_train.parquet"
 export TEST_FILES="['${DATA_ROOT}/Eurus/code_validation.parquet']"
+export CHECKPOINT_ROOT="${CHECKPOINT_ROOT:-${VERL_ROOT}/G-OPD-checkpoints}"
+export LAMBDA_VAL="${LAMBDA_VAL:-1.25}"
 export TOTAL_TRAINING_STEPS="${TOTAL_TRAINING_STEPS:-50}"
 export TOTAL_EPOCHS="${TOTAL_EPOCHS:-3}"
-export EXPERIMENT_NAME="qwen3_4b_code_single_teacher_prefix_${EXTRAPOLATION_SPEC}_lambda_${LAMBDA_VAL:-1.25}_steps_${TOTAL_TRAINING_STEPS}"
+export TRAINER_LOGGER="${TRAINER_LOGGER:-[\"console\",\"wandb\"]}"
+export RUN_POST_TRAIN_EVAL="${RUN_POST_TRAIN_EVAL:-1}"
+export EXPERIMENT_NAME="${EXPERIMENT_NAME:-qwen3_4b_code_single_teacher_prefix_${EXTRAPOLATION_SPEC}_lambda_${LAMBDA_VAL}_steps_${TOTAL_TRAINING_STEPS}}"
 export EVAL_SUITE=code
+# ===========================================================================
 
 SANDBOX_FUSION_URL="${SANDBOX_FUSION_URL:-null}"
 SANDBOX_MAX_CONCURRENT="${SANDBOX_MAX_CONCURRENT:-64}"
