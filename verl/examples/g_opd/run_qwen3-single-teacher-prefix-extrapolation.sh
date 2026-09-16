@@ -25,7 +25,7 @@ Environment variables:
   CHECKPOINT_ROOT      Root directory for checkpoints.
   LAMBDA_VAL           Reward scaling factor (default: 1.25).
   TOTAL_TRAINING_STEPS Paper setting for same-size G-OPD (default: 50).
-  TOTAL_EPOCHS         Dataloader-pass upper bound (Math default: 1).
+  TOTAL_EPOCHS         Dataloader-pass upper bound (default: 3).
   TRAINER_LOGGER       Hydra logger list (default: ["console","wandb"]).
   RUN_POST_TRAIN_EVAL  Run merge and Math/Code evaluation after training (default: 1).
   MERGE_USE_CPU_INITIALIZATION  Merge safely on CPU (default: 1).
@@ -86,7 +86,7 @@ TEACHER_MODEL_PATH="${TEACHER_MODEL_PATH:-${MODEL_ROOT}/Qwen3-4B-Non-Thinking-RL
 CHECKPOINT_ROOT="${CHECKPOINT_ROOT:-${VERL_ROOT}/G-OPD-checkpoints}"
 LAMBDA_VAL="${LAMBDA_VAL:-1.25}"
 TOTAL_TRAINING_STEPS="${TOTAL_TRAINING_STEPS:-50}"
-TOTAL_EPOCHS="${TOTAL_EPOCHS:-1}"
+TOTAL_EPOCHS="${TOTAL_EPOCHS:-3}"
 TRAINER_LOGGER="${TRAINER_LOGGER:-[\"console\",\"wandb\"]}"
 
 export PYTHONUNBUFFERED=1

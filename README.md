@@ -149,9 +149,9 @@ student and actor base model, while the default Math teacher is
 `/personal/models/Qwen3-4B-Non-Thinking-RL-Math-Step500`. The default data directory is the
 `G-OPD-Training-Data` directory created next to this repository by `scripts/download_gopd_data.sh`.
 For the same-size 4B-to-4B setting, `trainer.total_training_steps` is explicitly fixed to the paper's
-50-step setting. Math uses a one-epoch upper bound because its 57K examples provide more than 50
-batches at batch size 1024. Code uses a three-epoch upper bound because its 25K examples require the
-dataloader to cycle, but the trainer still stops immediately at step 50. Override
+50-step setting. Math and Code use a three-epoch dataloader upper bound so prompt filtering or a
+short dataset cannot end training before step 50; the explicit step limit still stops the trainer
+immediately after step 50. Override
 `TOTAL_TRAINING_STEPS` only for a deliberate non-paper experiment.
 
 The equivalent single-code-teacher entry point uses `Eurus/code_train.parquet` and
