@@ -290,11 +290,12 @@ We provide an example to perform [OPSD](https://arxiv.org/pdf/2601.18734) in `./
 ## Evaluation
 
 ### Math Reasoning Evaluation
-Math evaluation data is in the ``data/`` folder. Math evaluation code and script are in the ``math_eval/`` folder. 
+Math evaluation data is in the ``data/`` folder. The evaluation suite includes AIME 2024,
+AIME 2025, HMMT 2025 February, HMMT 2025 November, MATH-500, and AMC23. Math evaluation
+code and scripts are in the ``math_eval/`` folder.
 
 ```bash
-cd math_eval/
-sh scripts/run_eval_math.sh
+bash math_eval/run_eval_math.sh
 ```
 
 ### Code Generation Evaluation

@@ -17,6 +17,8 @@ mkdir -p "${OUTPUT_ROOT}/aime24"
 mkdir -p "${OUTPUT_ROOT}/aime25"
 mkdir -p "${OUTPUT_ROOT}/hmmt25_feb"
 mkdir -p "${OUTPUT_ROOT}/hmmt25_nov"
+mkdir -p "${OUTPUT_ROOT}/math500"
+mkdir -p "${OUTPUT_ROOT}/amc23"
 
 # aime24
 CUDA_VISIBLE_DEVICES="${MATH_EVAL_GPUS_AIME24:-0,1}" python3 "${SCRIPT_DIR}/eval_math.py" \
@@ -70,6 +72,45 @@ CUDA_VISIBLE_DEVICES="${MATH_EVAL_GPUS_HMMT_NOV:-6,7}" python3 "${SCRIPT_DIR}/ev
     --input_file "${REPO_ROOT}/data/hmmt25_nov/test.jsonl" \
     --model_path "${MODEL_PATH}" \
     --output_file "${OUTPUT_ROOT}/hmmt25_nov/${MODEL_NAME}.jsonl" \
+    --max_tokens 16384 \
+    --temperature 1.0 \
+    --top_p 1.0 \
+    --max_num_seqs 256 \
+    --n 32 \
+    --begin_idx -1 \
+    --end_idx -1 --seed 42 &
+pids+=("$!")
+
+eval_status=0
+for pid in "${pids[@]}"; do
+    if ! wait "${pid}"; then
+        eval_status=1
+    fi
+done
+if [[ "${eval_status}" -ne 0 ]]; then
+    echo "One or more Math evaluations failed." >&2
+    exit "${eval_status}"
+fi
+
+# MATH-500 and AMC23 run as a second batch so the default GPU assignments do
+# not overlap with the four evaluations above on an 8-GPU machine.
+CUDA_VISIBLE_DEVICES="${MATH_EVAL_GPUS_MATH500:-0,1}" python3 "${SCRIPT_DIR}/eval_math.py" \
+    --input_file "${REPO_ROOT}/data/math500/test.jsonl" \
+    --model_path "${MODEL_PATH}" \
+    --output_file "${OUTPUT_ROOT}/math500/${MODEL_NAME}.jsonl" \
+    --max_tokens 16384 \
+    --temperature 1.0 \
+    --top_p 1.0 \
+    --max_num_seqs 256 \
+    --n 32 \
+    --begin_idx -1 \
+    --end_idx -1 --seed 42 &
+pids=("$!")
+
+CUDA_VISIBLE_DEVICES="${MATH_EVAL_GPUS_AMC23:-2,3}" python3 "${SCRIPT_DIR}/eval_math.py" \
+    --input_file "${REPO_ROOT}/data/amc23/test.jsonl" \
+    --model_path "${MODEL_PATH}" \
+    --output_file "${OUTPUT_ROOT}/amc23/${MODEL_NAME}.jsonl" \
     --max_tokens 16384 \
     --temperature 1.0 \
     --top_p 1.0 \
