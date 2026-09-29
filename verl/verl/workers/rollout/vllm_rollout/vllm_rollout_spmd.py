@@ -159,6 +159,13 @@ class vLLMRollout(BaseRollout):
         )
         max_num_batched_tokens = self.config.get("max_num_batched_tokens", 8192)
 
+        val_response_length = config.val_kwargs.max_tokens
+        if val_response_length is None:
+            val_response_length = config.response_length
+        if val_response_length <= 0:
+            raise ValueError("val_kwargs.max_tokens must be a positive integer or null")
+        max_response_length = max(config.response_length, val_response_length)
+
         rope_scaling_config = getattr(model_hf_config, "rope_scaling", None)
         if not rope_scaling_config:
             max_position_embeddings = None
@@ -174,7 +181,7 @@ class vLLMRollout(BaseRollout):
                 max_position_embeddings = model_hf_config.text_config.max_position_embeddings
             if max_position_embeddings is None:
                 raise ValueError("max_position_embeddings not found in model_hf_config")
-            assert max_position_embeddings >= config.prompt_length + config.response_length, (
+            assert max_position_embeddings >= config.prompt_length + max_response_length, (
                 "model context length should be greater than total sequence length"
             )
         else:
@@ -185,14 +192,14 @@ class vLLMRollout(BaseRollout):
 
             assert (
                 model_hf_config.max_position_embeddings * rope_scaling_factor
-                >= config.prompt_length + config.response_length
+                >= config.prompt_length + max_response_length
             ), (
                 "model context length should be greater than total sequence length, "
                 + f"got rope_scaling_factor={rope_scaling_factor} and "
                 + f"max_position_embeddings={model_hf_config.max_position_embeddings}"
             )
 
-        max_model_len = int(config.max_model_len or config.prompt_length + config.response_length)
+        max_model_len = int(config.max_model_len or config.prompt_length + max_response_length)
 
         if max_num_batched_tokens < max_model_len and self.config.enable_chunked_prefill:
             raise ValueError(
@@ -368,6 +375,12 @@ class vLLMRollout(BaseRollout):
                 "temperature": self.config.val_kwargs.temperature,
                 "n": 1,  # if validate, already repeat in ray_trainer
             }
+        if is_validate:
+            kwargs["max_tokens"] = (
+                self.config.val_kwargs.max_tokens
+                if self.config.val_kwargs.max_tokens is not None
+                else self.config.response_length
+            )
 
         lora_requests = None
         if self.lora_kwargs:
@@ -402,12 +415,16 @@ class vLLMRollout(BaseRollout):
                             curr_log_prob.append(logprob[response_ids[i]].logprob)
                         rollout_log_probs.append(curr_log_prob)
 
-            response = pad_2d_list_to_length(response, self.pad_token_id, max_length=self.config.response_length).to(
-                idx.device
-            )
+            val_response_length = self.config.val_kwargs.max_tokens
+            if val_response_length is None:
+                val_response_length = self.config.response_length
+            target_response_length = val_response_length if is_validate else self.config.response_length
+            response = pad_2d_list_to_length(
+                response, self.pad_token_id, max_length=target_response_length
+            ).to(idx.device)
             if self.config.calculate_log_probs:
                 rollout_log_probs = pad_2d_list_to_length(
-                    rollout_log_probs, -1, max_length=self.config.response_length
+                    rollout_log_probs, -1, max_length=target_response_length
                 ).to(idx.device)
                 rollout_log_probs = rollout_log_probs.to(torch.float32)
 

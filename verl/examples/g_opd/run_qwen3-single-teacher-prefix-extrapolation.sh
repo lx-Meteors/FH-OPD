@@ -26,6 +26,11 @@ Environment variables:
   LAMBDA_VAL           Reward scaling factor (default: 1.25).
   TOTAL_TRAINING_STEPS Paper setting for same-size G-OPD (default: 50).
   TOTAL_EPOCHS         Dataloader-pass upper bound (default: 3).
+  MAX_RESPONSE_LENGTH  Maximum student rollout length (default: 16384).
+  VAL_MAX_RESPONSE_LENGTH  Validation rollout length (default: MAX_RESPONSE_LENGTH).
+  SAVE_FREQ            Checkpoint interval in training steps (default: 50).
+  TEST_FREQ            Online validation interval; -1 disables it (default: 10).
+  VAL_BEFORE_TRAIN     Run online validation before training (default: True).
   TRAINER_LOGGER       Hydra logger list (default: ["console","wandb"]).
   RUN_POST_TRAIN_EVAL  Run merge and Math/Code evaluation after training (default: 1).
   MERGE_USE_CPU_INITIALIZATION  Merge safely on CPU (default: 1).
@@ -87,6 +92,11 @@ CHECKPOINT_ROOT="${CHECKPOINT_ROOT:-${VERL_ROOT}/G-OPD-checkpoints}"
 LAMBDA_VAL="${LAMBDA_VAL:-1.25}"
 TOTAL_TRAINING_STEPS="${TOTAL_TRAINING_STEPS:-50}"
 TOTAL_EPOCHS="${TOTAL_EPOCHS:-3}"
+MAX_RESPONSE_LENGTH="${MAX_RESPONSE_LENGTH:-16384}"
+VAL_MAX_RESPONSE_LENGTH="${VAL_MAX_RESPONSE_LENGTH:-${MAX_RESPONSE_LENGTH}}"
+SAVE_FREQ="${SAVE_FREQ:-50}"
+TEST_FREQ="${TEST_FREQ:-10}"
+VAL_BEFORE_TRAIN="${VAL_BEFORE_TRAIN:-True}"
 TRAINER_LOGGER="${TRAINER_LOGGER:-[\"console\",\"wandb\"]}"
 
 export PYTHONUNBUFFERED=1
@@ -109,6 +119,11 @@ echo "  extrapolation_max_tokens=${EXTRAPOLATION_MAX_TOKENS}"
 echo "  lambda=${LAMBDA_VAL}"
 echo "  total_training_steps=${TOTAL_TRAINING_STEPS}"
 echo "  max_dataloader_epochs=${TOTAL_EPOCHS}"
+echo "  max_response_length=${MAX_RESPONSE_LENGTH}"
+echo "  val_max_response_length=${VAL_MAX_RESPONSE_LENGTH}"
+echo "  save_freq=${SAVE_FREQ}"
+echo "  test_freq=${TEST_FREQ}"
+echo "  val_before_train=${VAL_BEFORE_TRAIN}"
 echo "  student=${STUDENT_MODEL_PATH}"
 echo "  base_model=${BASE_MODEL_PATH}"
 echo "  teacher=${TEACHER_MODEL_PATH}"
@@ -136,7 +151,7 @@ python3 -m verl.trainer.main_ppo \
     data.val_files="${TEST_FILES}" \
     data.train_batch_size=1024 \
     data.max_prompt_length=2048 \
-    data.max_response_length=16384 \
+    data.max_response_length="${MAX_RESPONSE_LENGTH}" \
     data.filter_overlong_prompts=True \
     data.truncation=error \
     data.shuffle=True \
@@ -175,21 +190,22 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.val_kwargs.temperature=1.0 \
     actor_rollout_ref.rollout.val_kwargs.top_p=1.0 \
     actor_rollout_ref.rollout.val_kwargs.n=32 \
+    actor_rollout_ref.rollout.val_kwargs.max_tokens="${VAL_MAX_RESPONSE_LENGTH}" \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=4 \
     actor_rollout_ref.ref.fsdp_config.param_offload=True \
     algorithm.use_kl_in_reward=False \
     reward_model.reward_manager=naive \
     trainer.critic_warmup=0 \
-    trainer.val_before_train=True \
+    trainer.val_before_train="${VAL_BEFORE_TRAIN}" \
     trainer.logger="${TRAINER_LOGGER}" \
     trainer.log_val_generations=10 \
     trainer.project_name=on-policy-distillation \
     trainer.experiment_name="${EXPERIMENT_NAME}" \
     trainer.n_gpus_per_node=8 \
     trainer.nnodes=1 \
-    trainer.save_freq=50 \
+    trainer.save_freq="${SAVE_FREQ}" \
     trainer.default_local_dir="${OUTPUT_DIR}" \
-    trainer.test_freq=10 \
+    trainer.test_freq="${TEST_FREQ}" \
     trainer.total_training_steps="${TOTAL_TRAINING_STEPS}" \
     trainer.total_epochs="${TOTAL_EPOCHS}" \
     "$@"
