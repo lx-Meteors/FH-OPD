@@ -439,6 +439,7 @@ class RayPPOTrainer:
                 self.config.data,
                 self.tokenizer,
                 self.processor,
+                is_train=True,
                 max_samples=self.config.data.get("train_max_samples", -1),
             )
         if val_dataset is None:
@@ -447,6 +448,7 @@ class RayPPOTrainer:
                 self.config.data,
                 self.tokenizer,
                 self.processor,
+                is_train=False,
                 max_samples=self.config.data.get("val_max_samples", -1),
             )
         self.train_dataset, self.val_dataset = train_dataset, val_dataset

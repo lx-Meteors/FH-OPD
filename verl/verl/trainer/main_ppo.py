@@ -285,6 +285,13 @@ class TaskRunner:
 
         trust_remote_code = config.data.get("trust_remote_code", False)
         tokenizer = hf_tokenizer(local_path, trust_remote_code=trust_remote_code)
+        from verl.utils.memory_tokens import add_memory_tokens
+
+        memory_token_count = int(config.actor_rollout_ref.model.get("memory_token_count", 0))
+        memory_token_template = config.actor_rollout_ref.model.get(
+            "memory_token_template", "<|memory_token_{index:06d}|>"
+        )
+        memory_info = add_memory_tokens(tokenizer, memory_token_count, memory_token_template)
         # Used for multimodal LLM, could be None
         processor = hf_processor(local_path, trust_remote_code=trust_remote_code, use_fast=True)
 
@@ -298,7 +305,19 @@ class TaskRunner:
                 ref_model_path, use_shm=config.actor_rollout_ref.model.get("use_shm", False)
             )
             ref_tokenizer = hf_tokenizer(ref_local_path, trust_remote_code=trust_remote_code)
-            print(f"Loaded ref_tokenizer from {ref_local_path} for re-tokenization")
+            ref_memory_info = add_memory_tokens(ref_tokenizer, memory_token_count, memory_token_template)
+            if memory_info is not None and ref_memory_info is not None:
+                if memory_info.token_ids != ref_memory_info.token_ids:
+                    raise ValueError(
+                        "Student and teacher tokenizers assign different IDs to memory tokens: "
+                        f"student starts at {memory_info.token_ids[0]}, "
+                        f"teacher starts at {ref_memory_info.token_ids[0]}"
+                    )
+            if config.data.get("disable_ref_retokenization", False):
+                ref_tokenizer = None
+                print(f"Validated compatible ref tokenizer from {ref_local_path}; re-tokenization disabled")
+            else:
+                print(f"Loaded ref_tokenizer from {ref_local_path} for re-tokenization")
 
         # Load the reward manager for training and validation.
         reward_fn = load_reward_manager(
@@ -372,14 +391,18 @@ def create_rl_dataset(data_paths, data_config, tokenizer, processor, is_train=Tr
 
     # Check if a custom dataset class is specified in the data configuration
     # and if the path to the custom class is provided
-    if "custom_cls" in data_config and data_config.custom_cls.get("path", None) is not None:
+    custom_cls_config = data_config.get("custom_cls", {})
+    use_custom_cls = custom_cls_config.get("path", None) is not None and (
+        is_train or not custom_cls_config.get("apply_to_train_only", False)
+    )
+    if use_custom_cls:
         # Dynamically load the custom dataset class
-        dataset_cls = load_extern_type(data_config.custom_cls.path, data_config.custom_cls.name)
+        dataset_cls = load_extern_type(custom_cls_config.path, custom_cls_config.name)
         # Verify that the custom dataset class inherits from torch.utils.data.Dataset
         if not issubclass(dataset_cls, Dataset):
             raise TypeError(
-                f"The custom dataset class '{data_config.custom_cls.name}' from "
-                f"'{data_config.custom_cls.path}' must inherit from torch.utils.data.Dataset"
+                f"The custom dataset class '{custom_cls_config.name}' from "
+                f"'{custom_cls_config.path}' must inherit from torch.utils.data.Dataset"
             )
     elif "datagen" in data_config and data_config.datagen.get("path", None) is not None and is_train:
         # If a data generation strategy is specified, use the DynamicGenDataset class

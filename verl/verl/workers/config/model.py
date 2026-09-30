@@ -22,6 +22,7 @@ from verl.base_config import BaseConfig
 from verl.utils import hf_processor, hf_tokenizer
 from verl.utils.fs import copy_to_local
 from verl.utils.import_utils import import_external_libs
+from verl.utils.memory_tokens import DEFAULT_MEMORY_TOKEN_TEMPLATE, add_memory_tokens
 from verl.utils.model import get_generation_config, update_model_config
 
 __all__ = ["HFModelConfig"]
@@ -41,6 +42,7 @@ class HFModelConfig(BaseConfig):
         "architectures",
         "local_hf_config_path",
         "local_tokenizer_path",
+        "memory_token_original_vocab_size",
     }
 
     path: str = MISSING
@@ -91,6 +93,16 @@ class HFModelConfig(BaseConfig):
     use_fused_kernels: bool = False
     fused_kernel_options: dict = field(default_factory=dict)
 
+    # Number of prompt-only virtual token IDs appended to the tokenizer and
+    # model embedding table. A value of zero disables memory prompts.
+    memory_token_count: int = 0
+
+    # Deterministic token spelling shared by the driver, FSDP workers, and vLLM.
+    memory_token_template: str = DEFAULT_MEMORY_TOKEN_TEMPLATE
+
+    # Set at runtime after extending the tokenizer.
+    memory_token_original_vocab_size: Optional[int] = None
+
     architectures: Optional[list[str]] = None
 
     def __post_init__(self):
@@ -108,6 +120,13 @@ class HFModelConfig(BaseConfig):
             self.local_tokenizer_path = copy_to_local(self.tokenizer_path, use_shm=self.use_shm)
             self.tokenizer = hf_tokenizer(self.local_tokenizer_path, trust_remote_code=self.trust_remote_code)
             self.processor = hf_processor(self.local_tokenizer_path, trust_remote_code=self.trust_remote_code)
+            memory_info = add_memory_tokens(
+                self.tokenizer,
+                self.memory_token_count,
+                self.memory_token_template,
+            )
+            if memory_info is not None:
+                self.memory_token_original_vocab_size = memory_info.original_vocab_size
 
         if self.custom_chat_template is not None:
             if self.processor is not None:
@@ -142,6 +161,15 @@ class HFModelConfig(BaseConfig):
             self.override_config["model_config"] if "model_config" in self.override_config else self.override_config
         )
         override_config_kwargs.update(override_config)
+        if self.memory_token_original_vocab_size is not None:
+            override_config_kwargs.update(
+                {
+                    "vocab_size": len(self.tokenizer),
+                    "memory_token_output_vocab_size": self.memory_token_original_vocab_size,
+                    "memory_token_count": self.memory_token_count,
+                    "memory_token_template": self.memory_token_template,
+                }
+            )
         update_model_config(self.hf_config, override_config_kwargs=override_config_kwargs)
 
         self.share_embeddings_and_output_weights = getattr(self.hf_config, "tie_word_embeddings", False)

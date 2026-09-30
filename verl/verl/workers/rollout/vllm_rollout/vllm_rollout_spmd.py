@@ -217,6 +217,16 @@ class vLLMRollout(BaseRollout):
         #    (which can vary across different vLLM versions);
         # - Otherwise it's the desired value we want to explicitly set.
         engine_kwargs = {key: val for key, val in engine_kwargs.items() if val is not None}
+        memory_output_vocab_size = model_config.memory_token_original_vocab_size
+        if memory_output_vocab_size is not None:
+            hf_overrides = dict(engine_kwargs.get("hf_overrides", {}) or {})
+            hf_overrides.update(
+                {
+                    "vocab_size": len(tokenizer),
+                    "memory_token_output_vocab_size": memory_output_vocab_size,
+                }
+            )
+            engine_kwargs["hf_overrides"] = hf_overrides
         if config.get("limit_images", None):  # support for multi-image data
             engine_kwargs["limit_mm_per_prompt"] = {"image": config.get("limit_images")}
 
@@ -258,6 +268,11 @@ class vLLMRollout(BaseRollout):
             **self.lora_kwargs,
             **engine_kwargs,
         )
+        if memory_output_vocab_size is not None:
+            rollout_model = (
+                self.inference_engine.llm_engine.model_executor.driver_worker.worker.model_runner.model
+            )
+            _monkey_patch_compute_logits(rollout_model, memory_output_vocab_size)
 
         kwargs = dict(
             n=1,
@@ -515,6 +530,8 @@ class vLLMRollout(BaseRollout):
 
 # https://github.com/vllm-project/vllm/issues/13175
 def _monkey_patch_compute_logits(model, vocab_size: int):
+    if getattr(model, "_verl_output_vocab_size", None) == vocab_size:
+        return
     original_compute_logits = model.compute_logits
 
     def compute_logits(
@@ -527,6 +544,7 @@ def _monkey_patch_compute_logits(model, vocab_size: int):
         return logits
 
     model.compute_logits = MethodType(compute_logits, model)
+    model._verl_output_vocab_size = vocab_size
 
 
 class vLLMAsyncRollout(BaseRollout):
@@ -615,7 +633,8 @@ class vLLMAsyncRollout(BaseRollout):
 
     def _load_model(self, *args, **kwargs):
         self.inference_engine.load_model(*args, **kwargs)
-        _monkey_patch_compute_logits(self.inference_engine.worker.model_runner.model, len(self.tokenizer))
+        output_vocab_size = self.model_config.memory_token_original_vocab_size or len(self.tokenizer)
+        _monkey_patch_compute_logits(self.inference_engine.worker.model_runner.model, output_vocab_size)
 
     async def _execute_method(self, method: str | bytes, *args, **kwargs):
         if method == "init_worker":

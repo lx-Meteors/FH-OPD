@@ -48,6 +48,7 @@ from verl.models.transformers.monkey_patch import apply_monkey_patch
 from verl.single_controller.base import Worker
 from verl.single_controller.base.decorator import Dispatch, make_nd_compute_dataproto_dispatch_fn, register
 from verl.utils import hf_processor, hf_tokenizer
+from verl.utils.memory_tokens import add_memory_tokens, resize_model_for_memory_tokens
 from verl.utils.activation_offload import enable_activation_offloading
 from verl.utils.checkpoint.fsdp_checkpoint_manager import FSDPCheckpointManager
 from verl.utils.config import omega_conf_to_dataclass
@@ -301,6 +302,15 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         # TODO(zhangchi.usc1992): 1. support create from random initialized model. 2. Support init with FSDP directly
         self.tokenizer = hf_tokenizer(local_path, trust_remote_code=trust_remote_code)
         self.processor = hf_processor(local_path, trust_remote_code=trust_remote_code)
+        memory_token_count = int(self.config.model.get("memory_token_count", 0))
+        memory_token_template = self.config.model.get(
+            "memory_token_template", "<|memory_token_{index:06d}|>"
+        )
+        memory_token_info = add_memory_tokens(
+            self.tokenizer,
+            memory_token_count,
+            memory_token_template,
+        )
 
         if self.config.model.get("custom_chat_template", None) is not None:
             if self.processor is not None:
@@ -381,6 +391,18 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 trust_remote_code=trust_remote_code,
                 attn_implementation=attn_implementation,
             )
+
+            resize_model_for_memory_tokens(
+                actor_module,
+                self.tokenizer,
+                memory_token_info,
+                memory_token_template,
+            )
+            if memory_token_info is not None and self.rank == 0:
+                print(
+                    f"Enabled {len(memory_token_info.token_ids)} prompt-only memory tokens for {role}: "
+                    f"ids={memory_token_info.token_ids[0]}..{memory_token_info.token_ids[-1]}"
+                )
 
             # Apply Liger kernel to the model if use_liger is set to True
             if use_liger:

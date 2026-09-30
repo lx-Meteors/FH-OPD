@@ -4,7 +4,7 @@ import torch
 import json
 from collections import Counter
 from vllm import LLM, SamplingParams
-from transformers import AutoTokenizer
+from transformers import AutoConfig, AutoTokenizer
 import re
 from math_verify import parse, verify
 import copy
@@ -99,6 +99,7 @@ def main():
     
 
     toker = AutoTokenizer.from_pretrained(args.model_path)
+    model_config = AutoConfig.from_pretrained(args.model_path)
     args.model_name = os.path.basename(args.model_path)
 
     llm = LLM(
@@ -108,8 +109,19 @@ def main():
         max_num_seqs=args.max_num_seqs,
     )
 
+    sampling_kwargs = {}
+    memory_token_count = int(getattr(model_config, "memory_token_count", 0))
+    if memory_token_count:
+        memory_token_template = getattr(
+            model_config, "memory_token_template", "<|memory_token_{index:06d}|>"
+        )
+        sampling_kwargs["bad_words"] = [
+            memory_token_template.format(index=index) for index in range(memory_token_count)
+        ]
+
     sampling_params = SamplingParams(temperature=args.temperature, top_p=args.top_p,
-                                    max_tokens=args.max_tokens, n=args.n, seed=args.seed)
+                                    max_tokens=args.max_tokens, n=args.n, seed=args.seed,
+                                    **sampling_kwargs)
 
 
     with open(args.input_file, "r", encoding="utf-8") as file:

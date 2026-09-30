@@ -111,6 +111,15 @@ class DataParallelPPOActor(BasePPOActor):
         if torch.distributed.get_rank() == 0:
             print(f"{role} use_fused_kernels={self.use_fused_kernels}")
 
+        unwrapped_module = actor_module
+        for wrapper_attr in ("_fsdp_wrapped_module", "module"):
+            if hasattr(unwrapped_module, wrapper_attr):
+                unwrapped_module = getattr(unwrapped_module, wrapper_attr)
+        model_config = getattr(unwrapped_module, "config", None)
+        self.output_vocab_size = getattr(model_config, "memory_token_output_vocab_size", None)
+        if self.output_vocab_size is not None and self.use_fused_kernels:
+            raise ValueError("Prompt-only memory tokens are not supported with use_fused_kernels=True")
+
         self.ulysses_sequence_parallel_size = self.config.ulysses_sequence_parallel_size
         self.use_ulysses_sp = self.ulysses_sequence_parallel_size > 1
 
@@ -239,6 +248,8 @@ class DataParallelPPOActor(BasePPOActor):
 
                 else:
                     logits_rmpad = output.logits.squeeze(0)  # (total_nnz, vocab_size)
+                    if self.output_vocab_size is not None:
+                        logits_rmpad = logits_rmpad[..., : self.output_vocab_size]
                     logits_rmpad.div_(temperature)
 
                     # if use_sp: ((total_nnz / sp) + pad) ; if not use_sp: (batch, seqlen)
@@ -317,6 +328,9 @@ class DataParallelPPOActor(BasePPOActor):
 
                 else:
                     logits = output.logits
+
+                    if self.output_vocab_size is not None:
+                        logits = logits[..., : self.output_vocab_size]
 
                     logits.div_(temperature)
                     logits = logits[:, -response_length - 1 : -1, :]  # (bsz, response_length, vocab_size)

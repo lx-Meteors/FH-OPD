@@ -103,6 +103,12 @@ custom_cls:
   # The name of the dataset class within the specified file.
   name: null
 
+  # If true, validation keeps using the built-in parquet dataset.
+  apply_to_train_only: False
+
+# Skip teacher re-tokenization after checking that its memory-token IDs match.
+disable_ref_retokenization: False
+
 # Whether to return multi-modal inputs in the dataset. Set to False if rollout generates new multi-modal inputs.
 return_multi_modal_inputs: True
 

@@ -65,3 +65,12 @@ fused_kernel_options:
 
   # the implementation backend for fused kernels.
   impl_backend: torch
+
+# Number of prompt-only virtual memory tokens. Zero disables this feature.
+memory_token_count: 0
+
+# Token format shared by the dataset, actor, teacher, and rollout engine.
+memory_token_template: "<|memory_token_{index:06d}|>"
+
+# Populated automatically after the tokenizer is extended.
+memory_token_original_vocab_size: null
