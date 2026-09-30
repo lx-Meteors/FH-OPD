@@ -1086,6 +1086,11 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             memory_indices = prompts.batch["memory_prompt_indices"]
             if torch.any(memory_indices < 0) or torch.any(memory_indices >= memory_bank.memory_bank.shape[0]):
                 raise ValueError("memory_prompt_indices contains an out-of-range bank index")
+            # Ray's TensorDict transport locks the received container, so adding
+            # a new key in-place fails. A non-recursive clone copies only the
+            # TensorDict structure (not the underlying prompt tensors) and is
+            # intentionally returned unlocked by TensorDict.
+            prompts.batch = prompts.batch.clone(recurse=False)
             prompts.batch["memory_prompt_embeds"] = memory_bank(memory_indices).detach().to(torch.bfloat16)
             memory_bank_payload = serialize_memory_bank(memory_bank.memory_bank)
 
