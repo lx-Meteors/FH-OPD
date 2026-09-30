@@ -103,6 +103,26 @@ class HFModelConfig(BaseConfig):
     # Set at runtime after extending the tokenizer.
     memory_token_original_vocab_size: Optional[int] = None
 
+    # Number of trainable continuous prompt vectors. Unlike memory_token_count,
+    # these vectors never enter the tokenizer or language-model vocabulary.
+    continuous_memory_bank_size: int = 0
+
+    # Initialization scale for the continuous prompt vectors.
+    continuous_memory_init_std: float = 0.02
+
+    # Rank-independent initialization seed for the replicated memory bank.
+    continuous_memory_seed: int = 42
+
+    # Reverse the bank gradient so it searches for prompts that are difficult
+    # for the student while the student still minimizes its OPD objective.
+    continuous_memory_adversarial: bool = False
+
+    # Multiplier applied to the reversed continuous-memory gradient.
+    continuous_memory_gradient_scale: float = 1.0
+
+    # Optional optimizer learning rate for the memory bank. Null uses actor LR.
+    continuous_memory_lr: Optional[float] = None
+
     architectures: Optional[list[str]] = None
 
     def __post_init__(self):

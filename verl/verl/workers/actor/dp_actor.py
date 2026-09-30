@@ -29,6 +29,11 @@ import verl.utils.torch_functional as verl_F
 from verl import DataProto
 from verl.trainer.ppo.core_algos import agg_loss, get_policy_loss_fn, kl_penalty
 from verl.utils.attention_utils import index_first_axis, pad_input, rearrange, unpad_input
+from verl.utils.continuous_memory import (
+    deserialize_memory_bank,
+    find_continuous_memory_bank,
+    replace_input_embeddings,
+)
 from verl.utils.device import get_device_id, get_device_name
 from verl.utils.fsdp_utils import FSDPModule, fsdp2_clip_grad_norm_
 from verl.utils.profiler import GPUMemoryLogger
@@ -122,6 +127,17 @@ class DataParallelPPOActor(BasePPOActor):
 
         self.ulysses_sequence_parallel_size = self.config.ulysses_sequence_parallel_size
         self.use_ulysses_sp = self.ulysses_sequence_parallel_size > 1
+        self.continuous_memory_bank = find_continuous_memory_bank(actor_module)
+        self._external_memory_bank = None
+        self._embedding_model = None
+        for module in actor_module.modules():
+            if hasattr(module, "get_input_embeddings") and callable(module.get_input_embeddings):
+                try:
+                    if module.get_input_embeddings() is not None:
+                        self._embedding_model = module
+                        break
+                except (AttributeError, NotImplementedError):
+                    continue
 
         if self.config.entropy_from_logits_with_chunking:
             entropy_from_logits = verl_F.entropy_from_logits_with_chunking
@@ -141,6 +157,69 @@ class DataParallelPPOActor(BasePPOActor):
             self.scaler = ShardedGradScaler(growth_interval=400)
         else:
             self.scaler = None
+
+    def _set_external_memory_bank(self, meta_info: dict) -> None:
+        if self.continuous_memory_bank is not None:
+            self._external_memory_bank = None
+            return
+        self._external_memory_bank = deserialize_memory_bank(
+            meta_info,
+            device=get_device_id(),
+            dtype=self.param_dtype,
+        )
+
+    def _memory_prompt_replacements(
+        self,
+        micro_batch: dict,
+        sequence_length: int,
+        unpad_indices: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+        memory_indices = micro_batch.get("memory_prompt_indices")
+        if memory_indices is None:
+            return None, None
+        if "ref_input_ids" in micro_batch:
+            raise ValueError("Continuous memory prompts do not support reference re-tokenization")
+        if self.use_ulysses_sp:
+            raise ValueError("Continuous memory prompts currently require ulysses_sequence_parallel_size=1")
+        if self._embedding_model is None:
+            raise RuntimeError("Could not locate the model input-embedding module")
+
+        bank = (
+            self.continuous_memory_bank.memory_bank
+            if self.continuous_memory_bank is not None
+            else self._external_memory_bank
+        )
+        if bank is None:
+            raise RuntimeError("Continuous memory prompt batch is missing the actor memory-bank snapshot")
+
+        prompt_length = memory_indices.size(-1)
+        if prompt_length > sequence_length:
+            raise ValueError(
+                f"Memory prompt length {prompt_length} exceeds model input length {sequence_length}"
+            )
+        memory_mask = memory_indices >= 0
+        safe_indices = memory_indices.clamp_min(0)
+        if torch.any(safe_indices >= bank.shape[0]):
+            raise ValueError("memory_prompt_indices contains an out-of-range bank index")
+
+        prompt_values = bank[safe_indices]
+        response_length = sequence_length - prompt_length
+        response_values = prompt_values.new_zeros(
+            prompt_values.size(0), response_length, prompt_values.size(-1)
+        )
+        response_mask = memory_mask.new_zeros(memory_mask.size(0), response_length)
+        replacement_values = torch.cat((prompt_values, response_values), dim=1)
+        replacement_mask = torch.cat((memory_mask, response_mask), dim=1)
+
+        if unpad_indices is not None:
+            replacement_values = index_first_axis(
+                rearrange(replacement_values, "b s h -> (b s) h"), unpad_indices
+            ).unsqueeze(0)
+            replacement_mask = index_first_axis(
+                rearrange(replacement_mask.unsqueeze(-1), "b s ... -> (b s) ..."), unpad_indices
+            ).transpose(0, 1)
+
+        return replacement_values, replacement_mask
 
     def _forward_micro_batch(
         self, micro_batch, temperature, calculate_entropy=False
@@ -227,20 +306,27 @@ class DataParallelPPOActor(BasePPOActor):
 
                 input_ids_rmpad_rolled = input_ids_rmpad_rolled.squeeze(0)  # ((total_nnz / sp) + pad)
 
+                memory_values, memory_mask = self._memory_prompt_replacements(
+                    micro_batch,
+                    sequence_length=seqlen,
+                    unpad_indices=indices,
+                )
+
                 # only pass input_ids and position_ids to enable flash_attn_varlen
                 extra_args = {}
                 if self.use_fused_kernels:
                     extra_args["temperature"] = temperature
                     extra_args["return_dict"] = True
 
-                output = self.actor_module(
-                    input_ids=input_ids_rmpad,
-                    attention_mask=None,
-                    position_ids=position_ids_rmpad,
-                    **multi_modal_inputs,
-                    use_cache=False,
-                    **extra_args,
-                )  # prevent model thinks we are generating
+                with replace_input_embeddings(self._embedding_model, memory_values, memory_mask):
+                    output = self.actor_module(
+                        input_ids=input_ids_rmpad,
+                        attention_mask=None,
+                        position_ids=position_ids_rmpad,
+                        **multi_modal_inputs,
+                        use_cache=False,
+                        **extra_args,
+                    )  # prevent model thinks we are generating
 
                 if self.use_fused_kernels:
                     log_probs = output.log_probs.squeeze(0)  # (total_nnz,)
@@ -313,14 +399,19 @@ class DataParallelPPOActor(BasePPOActor):
                     extra_args["temperature"] = temperature
                     extra_args["return_dict"] = True
 
-                output = self.actor_module(
-                    input_ids=input_ids,
-                    attention_mask=attention_mask,
-                    position_ids=position_ids,
-                    **multi_modal_inputs,
-                    use_cache=False,
-                    **extra_args,
-                )  # prevent model thinks we are generating
+                memory_values, memory_mask = self._memory_prompt_replacements(
+                    micro_batch,
+                    sequence_length=seqlen,
+                )
+                with replace_input_embeddings(self._embedding_model, memory_values, memory_mask):
+                    output = self.actor_module(
+                        input_ids=input_ids,
+                        attention_mask=attention_mask,
+                        position_ids=position_ids,
+                        **multi_modal_inputs,
+                        use_cache=False,
+                        **extra_args,
+                    )  # prevent model thinks we are generating
 
                 if self.use_fused_kernels:
                     log_probs = output.log_probs[:, -response_length - 1 : -1]
@@ -347,6 +438,15 @@ class DataParallelPPOActor(BasePPOActor):
         assert self.config.grad_clip is not None
         if self.scaler is not None:
             self.scaler.unscale_(self.actor_optimizer)
+        self._last_memory_bank_grad_norm = None
+        if self.continuous_memory_bank is not None and self.continuous_memory_bank.memory_bank.grad is not None:
+            memory_grad = self.continuous_memory_bank.memory_bank.grad
+            torch.distributed.all_reduce(memory_grad, op=torch.distributed.ReduceOp.SUM)
+            memory_grad.div_(torch.distributed.get_world_size())
+            self._last_memory_bank_grad_norm = memory_grad.detach().float().norm()
+            torch.nn.utils.clip_grad_norm_(
+                [self.continuous_memory_bank.memory_bank], max_norm=self.config.grad_clip
+            )
         if isinstance(self.actor_module, FSDP):
             grad_norm = self.actor_module.clip_grad_norm_(max_norm=self.config.grad_clip)
         elif isinstance(self.actor_module, FSDPModule):
@@ -397,6 +497,8 @@ class DataParallelPPOActor(BasePPOActor):
         has_multi_modal_inputs = "multi_modal_inputs" in data.non_tensor_batch.keys()
         has_ref_input_ids = "ref_input_ids" in data.batch.keys() # handle when ref input_ids is different from actor input_ids
         select_keys = ["responses", "input_ids", "attention_mask", "position_ids"]
+        if "memory_prompt_indices" in data.batch.keys():
+            select_keys.append("memory_prompt_indices")
         if has_ref_input_ids:
             select_keys.extend(["ref_input_ids", "ref_attention_mask", "ref_position_ids"])
         non_tensor_select_keys = ["multi_modal_inputs"] if has_multi_modal_inputs else []
@@ -411,16 +513,20 @@ class DataParallelPPOActor(BasePPOActor):
 
         log_probs_lst = []
         entropy_lst = []
-        for micro_batch in micro_batches:
-            micro_batch = micro_batch.to(get_device_id())
-            model_inputs = {**micro_batch.batch, **micro_batch.non_tensor_batch}
-            with torch.no_grad():
-                entropy, log_probs = self._forward_micro_batch(
-                    model_inputs, temperature=temperature, calculate_entropy=calculate_entropy
-                )
-            log_probs_lst.append(log_probs)
-            if calculate_entropy:
-                entropy_lst.append(entropy)
+        self._set_external_memory_bank(data.meta_info)
+        try:
+            for micro_batch in micro_batches:
+                micro_batch = micro_batch.to(get_device_id())
+                model_inputs = {**micro_batch.batch, **micro_batch.non_tensor_batch}
+                with torch.no_grad():
+                    entropy, log_probs = self._forward_micro_batch(
+                        model_inputs, temperature=temperature, calculate_entropy=calculate_entropy
+                    )
+                log_probs_lst.append(log_probs)
+                if calculate_entropy:
+                    entropy_lst.append(entropy)
+        finally:
+            self._external_memory_bank = None
 
         log_probs = torch.concat(log_probs_lst, dim=0)
         entropys = None
@@ -450,6 +556,8 @@ class DataParallelPPOActor(BasePPOActor):
             "old_log_probs",
             "advantages",
         ]
+        if "memory_prompt_indices" in data.batch.keys():
+            select_keys.append("memory_prompt_indices")
         if self.config.use_kl_loss:
             select_keys.append("ref_log_prob")
         # Include pre-computed IS weights if present in batch
@@ -662,6 +770,14 @@ class DataParallelPPOActor(BasePPOActor):
 
                 grad_norm = self._optimizer_step()
                 mini_batch_metrics = {"actor/grad_norm": grad_norm.detach().item()}
+                if self.continuous_memory_bank is not None:
+                    mini_batch_metrics["actor/memory_bank_norm"] = (
+                        self.continuous_memory_bank.memory_bank.detach().float().norm().item()
+                    )
+                    if self._last_memory_bank_grad_norm is not None:
+                        mini_batch_metrics["actor/memory_bank_grad_norm"] = (
+                            self._last_memory_bank_grad_norm.item()
+                        )
                 append_to_dict(metrics, mini_batch_metrics)
         self.actor_optimizer.zero_grad()
         return metrics

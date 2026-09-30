@@ -52,6 +52,12 @@ from verl.utils.memory_tokens import add_memory_tokens, resize_model_for_memory_
 from verl.utils.activation_offload import enable_activation_offloading
 from verl.utils.checkpoint.fsdp_checkpoint_manager import FSDPCheckpointManager
 from verl.utils.config import omega_conf_to_dataclass
+from verl.utils.continuous_memory import (
+    attach_continuous_memory_bank,
+    find_continuous_memory_bank,
+    is_continuous_memory_bank_state_key,
+    serialize_memory_bank,
+)
 from verl.utils.device import (
     get_device_id,
     get_device_name,
@@ -429,6 +435,29 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             if enable_gradient_checkpointing:
                 actor_module.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
 
+        continuous_memory_bank = None
+        continuous_memory_bank_size = int(self.config.model.get("continuous_memory_bank_size", 0))
+        if continuous_memory_bank_size > 0 and role == "actor" and self._is_actor:
+            continuous_memory_bank = attach_continuous_memory_bank(
+                actor_module,
+                bank_size=continuous_memory_bank_size,
+                init_std=float(self.config.model.get("continuous_memory_init_std", 0.02)),
+                device=torch.device(f"{get_device_name()}:{get_device_id()}"),
+                seed=int(self.config.model.get("continuous_memory_seed", 42)),
+                adversarial=bool(self.config.model.get("continuous_memory_adversarial", False)),
+                gradient_scale=float(self.config.model.get("continuous_memory_gradient_scale", 1.0)),
+            )
+            # ignored_modules keeps this small parameter replicated. We reduce
+            # its gradient explicitly in DataParallelPPOActor. A fixed local
+            # seed gives every rank the same initial replica without a CPU/NCCL
+            # broadcast during model construction.
+            if self.rank == 0:
+                objective = "adversarial/max" if continuous_memory_bank.adversarial else "cooperative/min"
+                print(
+                    "Enabled continuous memory bank for actor: "
+                    f"shape={tuple(continuous_memory_bank.memory_bank.shape)}, objective={objective}"
+                )
+
         if self._is_lora:
             print("Applying LoRA to actor module")
             actor_module.enable_input_require_grads()
@@ -526,8 +555,11 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 device_mesh=self.device_mesh,
                 use_orig_params=self.use_orig_params,
                 forward_prefetch=fsdp_config.get("forward_prefetch", False),
+                ignored_modules=[continuous_memory_bank] if continuous_memory_bank is not None else None,
             )
         elif fsdp_strategy == "fsdp2":
+            if continuous_memory_bank is not None:
+                raise ValueError("Continuous memory prompts currently require actor.strategy=fsdp, not fsdp2")
             assert CPUOffloadPolicy is not None, "PyTorch version >= 2.4 is required for using fully_shard API (FSDP2)"
             mp_policy = MixedPrecisionPolicy(
                 param_dtype=param_dtype, reduce_dtype=reduce_dtype, cast_forward_inputs=True
@@ -562,7 +594,24 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         if role == "actor" and optim_config is not None:
             from verl.utils.torch_functional import get_constant_schedule_with_warmup, get_cosine_schedule_with_warmup
 
-            actor_optimizer = build_optimizer(actor_module_fsdp.parameters(), optim_config)
+            optimizer_parameters = actor_module_fsdp.parameters()
+            memory_bank = find_continuous_memory_bank(actor_module_fsdp)
+            memory_lr = self.config.model.get("continuous_memory_lr", None)
+            if memory_bank is not None and memory_lr is not None:
+                memory_parameter = memory_bank.memory_bank
+                regular_parameters = [
+                    parameter for parameter in actor_module_fsdp.parameters() if parameter is not memory_parameter
+                ]
+                optimizer_parameters = [
+                    {"params": regular_parameters},
+                    {
+                        "params": [memory_parameter],
+                        "lr": float(memory_lr),
+                        "weight_decay": 0.0,
+                        "name": "continuous_memory_bank",
+                    },
+                ]
+            actor_optimizer = build_optimizer(optimizer_parameters, optim_config)
 
             total_steps = optim_config.get("total_training_steps", 0)
             num_warmup_steps = int(optim_config.get("lr_warmup_steps", -1))
@@ -692,6 +741,11 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 params = {replace_lora_wrapper(k, peft_config): v for k, v in params.items()}
         else:
             params = self.actor_module_fsdp.state_dict()
+
+        # vLLM receives the continuous prompt through prompt_embeds. It must
+        # not try to load this actor-only auxiliary parameter as a model weight.
+        if isinstance(params, dict):
+            params = {name: value for name, value in params.items() if not is_continuous_memory_bank_state_key(name)}
 
         params = convert_weight_keys(
             params, getattr(self.actor_module_fsdp, "_fsdp_wrapped_module", self.actor_module_fsdp)
@@ -982,6 +1036,9 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
             lr = self.actor_lr_scheduler.get_last_lr()[0]
             metrics["actor/lr"] = lr.item() if torch.is_tensor(lr) else lr
+            for param_group in self.actor_optimizer.param_groups:
+                if param_group.get("name") == "continuous_memory_bank":
+                    metrics["actor/memory_bank_lr"] = param_group["lr"]
             self.actor_lr_scheduler.step()
 
             # TODO: here, we should return all metrics
@@ -1021,6 +1078,17 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             loop.run_until_complete(self.rollout_mode())
             log_gpu_memory_usage("After switch to rollout mode", logger=logger)
 
+        memory_bank_payload = None
+        if "memory_prompt_indices" in prompts.batch.keys():
+            memory_bank = find_continuous_memory_bank(self.actor_module_fsdp)
+            if memory_bank is None:
+                raise RuntimeError("Memory prompt indices were provided, but the actor has no continuous memory bank")
+            memory_indices = prompts.batch["memory_prompt_indices"]
+            if torch.any(memory_indices < 0) or torch.any(memory_indices >= memory_bank.memory_bank.shape[0]):
+                raise ValueError("memory_prompt_indices contains an out-of-range bank index")
+            prompts.batch["memory_prompt_embeds"] = memory_bank(memory_indices).detach().to(torch.bfloat16)
+            memory_bank_payload = serialize_memory_bank(memory_bank.memory_bank)
+
         with simple_timer("generate_sequences", timing_generate):
             output = self.rollout.generate_sequences(prompts=prompts)
 
@@ -1042,6 +1110,8 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             }
         )
         output.meta_info["timing"] = timing_generate
+        if memory_bank_payload is not None:
+            output.meta_info.update(memory_bank_payload)
         output = output.to("cpu")
 
         # clear kv cache

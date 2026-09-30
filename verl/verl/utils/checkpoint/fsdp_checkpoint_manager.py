@@ -29,6 +29,7 @@ from transformers import GenerationConfig, PreTrainedTokenizer, ProcessorMixin
 from transformers.dynamic_module_utils import custom_object_save
 
 from verl.utils.device import is_cuda_available
+from verl.utils.continuous_memory import is_continuous_memory_bank_state_key
 from verl.utils.fs import copy_to_local, is_non_local, local_mkdir_safe
 from verl.utils.fsdp_utils import fsdp_version, get_fsdp_full_state_dict, get_fsdp_state_ctx
 from verl.utils.logger import log_with_rank
@@ -311,6 +312,17 @@ class FSDPCheckpointManager(BaseCheckpointManager):
             if self.rank == 0:
                 hf_local_path = os.path.join(local_path, "huggingface")
                 os.makedirs(hf_local_path, exist_ok=True)
+
+                for key in list(state_dict.keys()):
+                    if is_continuous_memory_bank_state_key(key):
+                        memory_bank_path = os.path.join(hf_local_path, "continuous_memory_bank.pt")
+                        torch.save({"memory_bank": state_dict.pop(key)}, memory_bank_path)
+                        log_with_rank(
+                            f"Saved auxiliary continuous memory bank to {memory_bank_path}",
+                            rank=self.rank,
+                            logger=logger,
+                            log_only_rank_0=True,
+                        )
 
                 if "ForTokenClassification" in model_config.architectures[0]:
                     from transformers import AutoModelForTokenClassification

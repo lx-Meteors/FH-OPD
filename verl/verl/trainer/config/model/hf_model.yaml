@@ -74,3 +74,21 @@ memory_token_template: "<|memory_token_{index:06d}|>"
 
 # Populated automatically after the tokenizer is extended.
 memory_token_original_vocab_size: null
+
+# Number of trainable continuous prompt vectors. Zero disables this feature.
+continuous_memory_bank_size: 0
+
+# Initialization standard deviation for continuous memory vectors.
+continuous_memory_init_std: 0.02
+
+# Rank-independent initialization seed for the replicated memory bank.
+continuous_memory_seed: 42
+
+# Reverse only the memory-bank gradient to search for hard prompts.
+continuous_memory_adversarial: False
+
+# Scale applied to the continuous-memory gradient (after optional reversal).
+continuous_memory_gradient_scale: 1.0
+
+# Optional memory-bank optimizer learning rate. Null uses the actor LR.
+continuous_memory_lr: null

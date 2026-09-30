@@ -217,6 +217,15 @@ class vLLMRollout(BaseRollout):
         #    (which can vary across different vLLM versions);
         # - Otherwise it's the desired value we want to explicitly set.
         engine_kwargs = {key: val for key, val in engine_kwargs.items() if val is not None}
+        continuous_memory_enabled = int(getattr(model_config, "continuous_memory_bank_size", 0)) > 0
+        if continuous_memory_enabled:
+            current_vllm_version = get_version("vllm")
+            if not current_vllm_version or vs.parse(current_vllm_version) < vs.parse("0.10.0"):
+                raise RuntimeError(
+                    "Continuous memory prompts require vLLM>=0.10.0 for prompt_embeds; "
+                    f"found {current_vllm_version or 'unknown'}"
+                )
+            engine_kwargs["enable_prompt_embeds"] = True
         memory_output_vocab_size = model_config.memory_token_original_vocab_size
         if memory_output_vocab_size is not None:
             hf_overrides = dict(engine_kwargs.get("hf_overrides", {}) or {})
@@ -343,26 +352,44 @@ class vLLMRollout(BaseRollout):
         batch_size = idx.size(0)
 
         non_tensor_batch = prompts.non_tensor_batch
-        if "raw_prompt_ids" not in non_tensor_batch:
-            non_tensor_batch["raw_prompt_ids"] = np.array(
-                [_pre_process_inputs(self.pad_token_id, idx[i]) for i in range(batch_size)], dtype=object
-            )
-
-        if batch_size != len(non_tensor_batch["raw_prompt_ids"]):
-            raise RuntimeError("vllm sharding manager is not work properly.")
-
-        if "multi_modal_data" in non_tensor_batch:
+        memory_prompt_embeds = prompts.batch.get("memory_prompt_embeds")
+        if memory_prompt_embeds is not None:
+            if "multi_modal_data" in non_tensor_batch:
+                raise ValueError("Continuous memory prompts do not support multi-modal rollout inputs")
+            if memory_prompt_embeds.ndim != 3 or memory_prompt_embeds.size(0) != batch_size:
+                raise ValueError(
+                    "memory_prompt_embeds must have shape [batch, prompt_length, hidden_size], "
+                    f"got {tuple(memory_prompt_embeds.shape)}"
+                )
+            # vLLM 0.10+ accepts one [sequence_length, hidden_size] tensor per request.
+            vllm_inputs = [{"prompt_embeds": memory_prompt_embeds[i]} for i in range(batch_size)]
+            non_tensor_batch.pop("raw_prompt_ids", None)
+        elif "multi_modal_data" in non_tensor_batch:
+            if "raw_prompt_ids" not in non_tensor_batch:
+                non_tensor_batch["raw_prompt_ids"] = np.array(
+                    [_pre_process_inputs(self.pad_token_id, idx[i]) for i in range(batch_size)], dtype=object
+                )
+            if batch_size != len(non_tensor_batch["raw_prompt_ids"]):
+                raise RuntimeError("vllm sharding manager is not work properly.")
             vllm_inputs = []
             for raw_prompt_ids, multi_modal_data in zip(
                 non_tensor_batch.pop("raw_prompt_ids"), non_tensor_batch.pop("multi_modal_data"), strict=True
             ):
                 vllm_inputs.append({"prompt_token_ids": raw_prompt_ids, "multi_modal_data": multi_modal_data})
         else:
+            if "raw_prompt_ids" not in non_tensor_batch:
+                non_tensor_batch["raw_prompt_ids"] = np.array(
+                    [_pre_process_inputs(self.pad_token_id, idx[i]) for i in range(batch_size)], dtype=object
+                )
+            if batch_size != len(non_tensor_batch["raw_prompt_ids"]):
+                raise RuntimeError("vllm sharding manager is not work properly.")
             vllm_inputs = [
                 {"prompt_token_ids": raw_prompt_ids} for raw_prompt_ids in non_tensor_batch.pop("raw_prompt_ids")
             ]
 
         for input_data in vllm_inputs:
+            if "prompt_embeds" in input_data:
+                continue
             # Ensure token IDs are lists or numpy arrays
             if not isinstance(input_data["prompt_token_ids"], list | np.ndarray):
                 raise TypeError(
@@ -473,6 +500,8 @@ class vLLMRollout(BaseRollout):
             },
             batch_size=batch_size,
         )
+        if "memory_prompt_indices" in prompts.batch.keys():
+            batch["memory_prompt_indices"] = prompts.batch["memory_prompt_indices"]
         if self.config.calculate_log_probs:
             # we will recompute old log prob with actor
             batch["rollout_log_probs"] = rollout_log_probs

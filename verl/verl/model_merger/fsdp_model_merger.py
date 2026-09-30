@@ -29,6 +29,8 @@ except ImportError:
 
 from tqdm import tqdm
 
+from verl.utils.continuous_memory import is_continuous_memory_bank_state_key
+
 from .base_model_merger import BaseModelMerger
 
 
@@ -161,6 +163,16 @@ class FSDPModelMerger(BaseModelMerger):
         param_placements: dict[str, list] = {}
 
         for key in set(model_state_dict_lst[0].keys()):
+            if is_continuous_memory_bank_state_key(key):
+                # This small FSDP-ignored parameter is replicated in every
+                # rank checkpoint, so concatenating rank copies would be wrong.
+                bank = model_state_dict_lst[0].pop(key)
+                if isinstance(bank, DTensor):
+                    bank = bank._local_tensor
+                state_dict[key] = bank.bfloat16()
+                for model_state_shard in model_state_dict_lst[1:]:
+                    model_state_shard.pop(key)
+                continue
             state_dict[key] = []
             for model_state_shard in model_state_dict_lst:
                 # add tensor shard in order of rank to state_dict[key]
@@ -214,6 +226,16 @@ class FSDPModelMerger(BaseModelMerger):
         print(f"Processing model shards with {total_shards} {mesh_shape} in total")
 
         merged_state_dict = self._load_and_merge_state_dicts(world_size, total_shards, mesh_shape, mesh_dim_names)
+
+        memory_bank_state = None
+        for key in list(merged_state_dict.keys()):
+            if is_continuous_memory_bank_state_key(key):
+                memory_bank_state = merged_state_dict.pop(key)
+        if memory_bank_state is not None and self.config.operation == "merge":
+            os.makedirs(self.config.target_dir, exist_ok=True)
+            memory_bank_path = os.path.join(self.config.target_dir, "continuous_memory_bank.pt")
+            torch.save({"memory_bank": memory_bank_state}, memory_bank_path)
+            print(f"Saved auxiliary continuous memory bank to {memory_bank_path}")
 
         if self.config.operation == "test":
             if not self.config.test_hf_dir:

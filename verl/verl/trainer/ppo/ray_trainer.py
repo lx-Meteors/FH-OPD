@@ -599,6 +599,8 @@ class RayPPOTrainer:
 
         # pop those keys for generation
         batch_keys_to_pop = ["input_ids", "attention_mask", "position_ids"]
+        if "memory_prompt_indices" in batch.batch.keys():
+            batch_keys_to_pop.append("memory_prompt_indices")
         non_tensor_batch_keys_to_pop = set(batch.non_tensor_batch.keys()) - reward_model_keys
         gen_batch = batch.pop(
             batch_keys=batch_keys_to_pop,
