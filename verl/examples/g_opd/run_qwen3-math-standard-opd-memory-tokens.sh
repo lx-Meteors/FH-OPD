@@ -35,7 +35,6 @@ echo "  validation_response_length=${VAL_MAX_RESPONSE_LENGTH}"
 
 exec bash "${SCRIPT_DIR}/run_qwen3-math-single-teacher-prefix-extrapolation.sh" 0 \
     data.train_batch_size="${TRAIN_BATCH_SIZE}" \
-    data.max_prompt_length="${MEMORY_PROMPT_LENGTH}" \
     data.dataloader_num_workers=0 \
     data.custom_cls.path="${SCRIPT_DIR}/memory_token_dataset.py" \
     data.custom_cls.name=MemoryTokenDataset \
