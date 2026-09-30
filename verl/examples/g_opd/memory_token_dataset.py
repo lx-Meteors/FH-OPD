@@ -26,6 +26,7 @@ class ContinuousMemoryPromptDataset(Dataset):
         self.prompt_length = int(memory_config.get("prompt_length", 32))
         self.bank_size = int(memory_config.get("bank_size", memory_config.get("token_count", 256)))
         self.seed = int(memory_config.get("seed", 42))
+        self.fixed_order = bool(memory_config.get("fixed_order", False))
 
         if max_samples > 0:
             self.num_prompts = min(self.num_prompts, max_samples)
@@ -35,6 +36,8 @@ class ContinuousMemoryPromptDataset(Dataset):
             raise ValueError("memory_prompt.prompt_length must be positive")
         if self.bank_size < 1:
             raise ValueError("memory_prompt.bank_size must be positive")
+        if self.fixed_order and self.prompt_length > self.bank_size:
+            raise ValueError("A fixed-order memory prompt cannot be longer than the memory bank")
         if tokenizer.pad_token_id is None:
             raise ValueError("The tokenizer must define pad_token_id for memory prompts")
 
@@ -44,11 +47,16 @@ class ContinuousMemoryPromptDataset(Dataset):
         return self.num_prompts
 
     def __getitem__(self, index: int) -> dict:
-        # Sampling without replacement gives each prompt more local diversity.
-        # If a prompt is longer than the bank, repeated vectors are unavoidable.
-        rng = np.random.default_rng(self.seed + int(index))
-        replace = self.prompt_length > self.bank_size
-        memory_indices = rng.choice(self.bank_size, size=self.prompt_length, replace=replace)
+        if self.fixed_order:
+            # Every dataset row represents an independent rollout from the same
+            # learned soft prompt: [m_0, m_1, ..., m_(prompt_length - 1)].
+            memory_indices = np.arange(self.prompt_length, dtype=np.int64)
+        else:
+            # Sampling without replacement gives each prompt more local diversity.
+            # If a prompt is longer than the bank, repeated vectors are unavoidable.
+            rng = np.random.default_rng(self.seed + int(index))
+            replace = self.prompt_length > self.bank_size
+            memory_indices = rng.choice(self.bank_size, size=self.prompt_length, replace=replace)
 
         # Placeholder IDs keep every downstream tensor shape/token-label path
         # valid, but their ordinary embeddings are never used for this prompt.
